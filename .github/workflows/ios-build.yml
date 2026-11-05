@@ -1,0 +1,88 @@
+name: iOS build
+
+# Ручной запуск: вкладка Actions -> iOS build -> Run workflow.
+# Собирает НЕПОДПИСАННЫЙ .ipa на раннере macOS и прикладывает его к запуску как артефакт.
+# Подписывает и ставит приложение на iPhone сам владелец через Sideloadly (своим Apple ID).
+# Для публичного репозитория раннер macOS бесплатен.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Хеш коммита попадает в сборку. Экран «О приложении» показывает его вместо dev.
+      EXPO_PUBLIC_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check types
+        run: npx tsc --noEmit
+
+      - name: Short commit hash
+        run: echo "EXPO_PUBLIC_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      # Папка ios/ не хранится в репозитории: Expo создаёт её из app.json.
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios
+
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE/Contents/Developer"; fi
+          xcodebuild -version
+
+      - name: Build unsigned archive
+        run: |
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          echo "Workspace: $WORKSPACE, scheme: $SCHEME"
+          xcodebuild archive \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tail -n 60
+
+      # .ipa = zip-архив папки Payload с приложением внутри.
+      - name: Package unsigned .ipa
+        run: |
+          mkdir -p Payload
+          cp -R "$RUNNER_TEMP"/App.xcarchive/Products/Applications/*.app Payload/
+          zip -qry "melikhova-mobile-${GITHUB_SHA::7}-unsigned.ipa" Payload
+          ls -la ./*.ipa
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: melikhova-mobile-ios-unsigned-ipa
+          path: melikhova-mobile-*-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Show result
+        run: |
+          {
+            echo "## iOS build"
+            echo "Commit: \`${GITHUB_SHA::7}\`"
+            echo "Unsigned .ipa is attached to this run as an artifact (section Artifacts below)."
+          } >> "$GITHUB_STEP_SUMMARY"
