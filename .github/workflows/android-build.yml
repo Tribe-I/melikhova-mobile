@@ -1,0 +1,58 @@
+name: Android build
+
+# Ручной запуск: вкладка Actions -> Android build -> Run workflow.
+# Автоматической сборки на каждое изменение main нет: бесплатных сборок Expo в месяц немного.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check types
+        run: npx tsc --noEmit
+
+      - name: Check Expo token
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "Secret EXPO_TOKEN is not set" >&2
+            exit 1
+          fi
+
+      # Хеш коммита передаётся в сборку как переменная окружения Expo (окружение preview).
+      # Экран «О приложении» показывает его вместо dev.
+      - name: Pass commit hash to the build
+        run: npx eas-cli@latest env:set preview --name EXPO_PUBLIC_COMMIT --value "${GITHUB_SHA::7}" --visibility plaintext --non-interactive
+
+      # Сборка идёт в облаке Expo. Шаг ждёт её окончания: зелёный запуск = готовый APK.
+      - name: Build APK in Expo cloud
+        run: npx eas-cli@latest build --platform android --profile preview --non-interactive --wait --json | tee build.json
+
+      - name: Show build links
+        run: |
+          {
+            echo "## Android build"
+            echo "Commit: \`${GITHUB_SHA::7}\`"
+            echo "Build page: $(jq -r '.[0].buildDetailsPageUrl' build.json)"
+            echo "APK: $(jq -r '.[0].artifacts.buildUrl' build.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
